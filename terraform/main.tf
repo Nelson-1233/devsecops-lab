@@ -16,9 +16,10 @@ resource "aws_s3_bucket_public_access_block" "publico" {
 
 resource "aws_security_group" "sg_seguro" {
   name        = "sg_ssh_restringido"
-  description = "Grupo de seguridad restringido para lab"
+  description = "Grupo de seguridad restringido para laboratorio"
 
   ingress {
+    description = "Permitir SSH únicamente desde la red interna del laboratorio"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
