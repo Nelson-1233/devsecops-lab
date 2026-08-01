@@ -6,12 +6,11 @@ RUN apt-get update \
     && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY app/ .
 
-# Crear usuario no privilegiado para ejecutar la aplicación
 RUN useradd --create-home --shell /bin/bash appuser \
     && chown -R appuser:appuser /app
 
