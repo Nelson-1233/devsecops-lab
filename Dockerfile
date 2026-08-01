@@ -4,24 +4,14 @@ WORKDIR /app
 
 RUN apt-get update \
     && apt-get upgrade -y \
-    && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-COPY app/requirements.txt ./requirements.txt
+COPY app/requirements.txt .
 
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ .
 
-RUN useradd --create-home --shell /bin/bash appuser \
-    && chown -R appuser:appuser /app
-
-USER appuser
-
-EXPOSE 8080
-
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/buscar')" || exit 1
+EXPOSE 5000
 
 CMD ["python", "app.py"]

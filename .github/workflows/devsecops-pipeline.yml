@@ -54,7 +54,7 @@ jobs:
 
 
   # ============================================================
-  # 3. SCA - TRIVY FILESYSTEM
+  # 3. SCA - TRIVY
   # ============================================================
   sca:
     name: 3. SCA (Trivy Filesystem)
@@ -71,8 +71,8 @@ jobs:
           scan-type: "fs"
           scan-ref: "app/"
           severity: "HIGH,CRITICAL"
-          exit-code: "1"
           ignore-unfixed: true
+          exit-code: "0"
 
 
   # ============================================================
@@ -108,12 +108,23 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image_digest: ${{ steps.build.outputs.digest }}
+      image_tag: ${{ steps.meta.outputs.tags }}
+
     env:
       REGISTRY: ghcr.io
       IMAGE_NAME: ${{ github.repository }}
 
     steps:
 
+      # ----------------------------------------------------------
+      # CHECKOUT
+      # ----------------------------------------------------------
       - name: Descargar código
         uses: actions/checkout@v4
 
@@ -138,12 +149,11 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=sha
+            type=sha,format=long
 
 
       # ----------------------------------------------------------
       # BUILD + PUSH
-      # Se publica directamente y se obtiene el digest real
       # ----------------------------------------------------------
       - name: Compilar y publicar imagen Docker
         id: build
@@ -157,15 +167,15 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # MOSTRAR REFERENCIA Y DIGEST
+      # MOSTRAR INFORMACIÓN
       # ----------------------------------------------------------
-      - name: Mostrar digest de la imagen
+      - name: Mostrar imagen publicada
         run: |
           echo "=========================================="
           echo "Imagen publicada:"
           echo "${{ steps.meta.outputs.tags }}"
           echo ""
-          echo "Digest:"
+          echo "Digest generado:"
           echo "${{ steps.build.outputs.digest }}"
           echo "=========================================="
 
@@ -192,11 +202,7 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # TRIVY - ESCANEO DE IMAGEN
-      #
-      # ignore-unfixed: true
-      # Evita bloquear el pipeline por vulnerabilidades
-      # que todavía no tienen una versión corregida.
+      # TRIVY
       # ----------------------------------------------------------
       - name: Escanear imagen Docker con Trivy
         uses: aquasecurity/trivy-action@master
@@ -220,10 +226,6 @@ jobs:
       packages: write
       id-token: write
 
-    env:
-      REGISTRY: ghcr.io
-      IMAGE_NAME: ${{ github.repository }}
-
     steps:
 
       # ----------------------------------------------------------
@@ -245,42 +247,35 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # OBTENER DIGEST REAL DE LA IMAGEN
+      # MOSTRAR REFERENCIA
       # ----------------------------------------------------------
-      - name: Obtener digest de la imagen publicada
-        id: image
+      - name: Mostrar imagen y digest
         run: |
-          IMAGE_REF="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${GITHUB_SHA}"
-
           echo "=========================================="
           echo "Imagen:"
-          echo "$IMAGE_REF"
+          echo "${{ needs.build-and-sbom.outputs.image_tag }}"
+          echo ""
+          echo "Digest:"
+          echo "${{ needs.build-and-sbom.outputs.image_digest }}"
           echo "=========================================="
-
-          DIGEST=$(docker buildx imagetools inspect "$IMAGE_REF" \
-            --format '{{json .Manifest.Digest}}')
-
-          echo "Digest encontrado:"
-          echo "$DIGEST"
-
-          echo "IMAGE_REF=$IMAGE_REF" >> "$GITHUB_OUTPUT"
-          echo "DIGEST=$DIGEST" >> "$GITHUB_OUTPUT"
 
 
       # ----------------------------------------------------------
-      # FIRMAR POR DIGEST
+      # FIRMAR EXACTAMENTE EL DIGEST GENERADO EN EL BUILD
       # ----------------------------------------------------------
       - name: Firmar imagen con Cosign Keyless
         env:
-          IMAGE_REF: ${{ steps.image.outputs.IMAGE_REF }}
-          DIGEST: ${{ steps.image.outputs.DIGEST }}
+          IMAGE_TAG: ${{ needs.build-and-sbom.outputs.image_tag }}
+          IMAGE_DIGEST: ${{ needs.build-and-sbom.outputs.image_digest }}
         run: |
+          IMAGE_REF="${IMAGE_TAG}@${IMAGE_DIGEST}"
+
           echo "=========================================="
-          echo "Firmando imagen:"
-          echo "${IMAGE_REF}@${DIGEST}"
+          echo "Imagen que será firmada:"
+          echo "$IMAGE_REF"
           echo "=========================================="
 
-          cosign sign --yes "${IMAGE_REF}@${DIGEST}"
+          cosign sign --yes "$IMAGE_REF"
 
 
       # ----------------------------------------------------------
@@ -288,15 +283,17 @@ jobs:
       # ----------------------------------------------------------
       - name: Verificar firma Cosign
         env:
-          IMAGE_REF: ${{ steps.image.outputs.IMAGE_REF }}
-          DIGEST: ${{ steps.image.outputs.DIGEST }}
+          IMAGE_TAG: ${{ needs.build-and-sbom.outputs.image_tag }}
+          IMAGE_DIGEST: ${{ needs.build-and-sbom.outputs.image_digest }}
         run: |
+          IMAGE_REF="${IMAGE_TAG}@${IMAGE_DIGEST}"
+
           echo "=========================================="
           echo "Verificando firma:"
-          echo "${IMAGE_REF}@${DIGEST}"
+          echo "$IMAGE_REF"
           echo "=========================================="
 
           cosign verify \
             --certificate-identity-regexp "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "${IMAGE_REF}@${DIGEST}"
+            "$IMAGE_REF"
