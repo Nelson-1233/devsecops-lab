@@ -2,11 +2,9 @@ name: Pipeline DevSecOps End-to-End
 
 on:
   push:
-    branches:
-      - "main"
+    branches: ["main"]
   pull_request:
-    branches:
-      - "main"
+    branches: ["main"]
 
 permissions:
   contents: read
@@ -35,7 +33,7 @@ jobs:
 
 
   # ============================================================
-  # 2. SAST
+  # 2. SAST - SEMGREP
   # ============================================================
   sast:
     name: 2. SAST (Semgrep)
@@ -52,10 +50,11 @@ jobs:
           config: >-
             p/python
             p/security-audit
+          generateSarif: "1"
 
 
   # ============================================================
-  # 3. SCA
+  # 3. SCA - TRIVY FILESYSTEM
   # ============================================================
   sca:
     name: 3. SCA (Trivy Filesystem)
@@ -66,7 +65,7 @@ jobs:
       - name: Descargar código
         uses: actions/checkout@v4
 
-      - name: Escaneo de dependencias con Trivy
+      - name: Escanear dependencias con Trivy
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: "fs"
@@ -77,7 +76,7 @@ jobs:
 
 
   # ============================================================
-  # 4. IaC SECURITY
+  # 4. IaC SECURITY - CHECKOV
   # ============================================================
   iac-security:
     name: 4. IaC Security (Checkov)
@@ -88,7 +87,7 @@ jobs:
       - name: Descargar código
         uses: actions/checkout@v4
 
-      - name: Escaneo de IaC con Checkov
+      - name: Ejecutar Checkov
         uses: bridgecrewio/checkov-action@master
         with:
           directory: "."
@@ -98,7 +97,7 @@ jobs:
 
 
   # ============================================================
-  # 5. BUILD, SBOM, TRIVY Y PUBLICACIÓN
+  # 5. BUILD + SBOM + TRIVY + PUSH
   # ============================================================
   build-and-sbom:
     name: 5. Build, Container Scan & SBOM
@@ -115,50 +114,64 @@ jobs:
 
     steps:
 
-      # ----------------------------------------------------------
-      # Checkout
-      # ----------------------------------------------------------
       - name: Descargar código
         uses: actions/checkout@v4
 
 
       # ----------------------------------------------------------
-      # Login GHCR
+      # LOGIN GHCR
       # ----------------------------------------------------------
       - name: Iniciar sesión en GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
 
       # ----------------------------------------------------------
-      # Metadata
+      # METADATA
       # ----------------------------------------------------------
-      - name: Extraer metadatos de la imagen
+      - name: Generar metadata de imagen
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ghcr.io/${{ github.repository }}
           tags: |
             type=sha
 
 
       # ----------------------------------------------------------
-      # Build local
+      # BUILD + PUSH
+      # Se publica directamente y se obtiene el digest real
       # ----------------------------------------------------------
-      - name: Compilar imagen Docker local
+      - name: Compilar y publicar imagen Docker
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          load: true
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
 
 
       # ----------------------------------------------------------
-      # Generar SBOM
+      # MOSTRAR REFERENCIA Y DIGEST
+      # ----------------------------------------------------------
+      - name: Mostrar digest de la imagen
+        run: |
+          echo "=========================================="
+          echo "Imagen publicada:"
+          echo "${{ steps.meta.outputs.tags }}"
+          echo ""
+          echo "Digest:"
+          echo "${{ steps.build.outputs.digest }}"
+          echo "=========================================="
+
+
+      # ----------------------------------------------------------
+      # SBOM
       # ----------------------------------------------------------
       - name: Generar SBOM con Syft
         uses: anchore/sbom-action@v0
@@ -169,7 +182,7 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # Publicar SBOM
+      # PUBLICAR SBOM
       # ----------------------------------------------------------
       - name: Publicar SBOM como artefacto
         uses: actions/upload-artifact@v4
@@ -179,27 +192,19 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # Trivy Container Scan
+      # TRIVY - ESCANEO DE IMAGEN
+      #
+      # ignore-unfixed: true
+      # Evita bloquear el pipeline por vulnerabilidades
+      # que todavía no tienen una versión corregida.
       # ----------------------------------------------------------
-      - name: Escaneo de imagen Docker con Trivy
+      - name: Escanear imagen Docker con Trivy
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.meta.outputs.tags }}
           severity: "CRITICAL"
-          exit-code: "0"
           ignore-unfixed: true
-
-
-      # ----------------------------------------------------------
-      # Publicar imagen en GHCR
-      # ----------------------------------------------------------
-      - name: Publicar imagen en GHCR
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          exit-code: "0"
 
 
   # ============================================================
@@ -215,17 +220,21 @@ jobs:
       packages: write
       id-token: write
 
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: ${{ github.repository }}
+
     steps:
 
       # ----------------------------------------------------------
-      # Instalar Cosign
+      # INSTALAR COSIGN
       # ----------------------------------------------------------
       - name: Instalar Cosign
         uses: sigstore/cosign-installer@v3.5.0
 
 
       # ----------------------------------------------------------
-      # Login GHCR
+      # LOGIN GHCR
       # ----------------------------------------------------------
       - name: Iniciar sesión en GHCR
         uses: docker/login-action@v3
@@ -236,15 +245,58 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # Firma Keyless
+      # OBTENER DIGEST REAL DE LA IMAGEN
       # ----------------------------------------------------------
-      - name: Firmar imagen mediante Sigstore
+      - name: Obtener digest de la imagen publicada
+        id: image
         run: |
           IMAGE_REF="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${GITHUB_SHA}"
 
           echo "=========================================="
-          echo "Imagen que será firmada:"
+          echo "Imagen:"
           echo "$IMAGE_REF"
           echo "=========================================="
 
-          cosign sign --yes "$IMAGE_REF"
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE_REF" \
+            --format '{{json .Manifest.Digest}}')
+
+          echo "Digest encontrado:"
+          echo "$DIGEST"
+
+          echo "IMAGE_REF=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+          echo "DIGEST=$DIGEST" >> "$GITHUB_OUTPUT"
+
+
+      # ----------------------------------------------------------
+      # FIRMAR POR DIGEST
+      # ----------------------------------------------------------
+      - name: Firmar imagen con Cosign Keyless
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.IMAGE_REF }}
+          DIGEST: ${{ steps.image.outputs.DIGEST }}
+        run: |
+          echo "=========================================="
+          echo "Firmando imagen:"
+          echo "${IMAGE_REF}@${DIGEST}"
+          echo "=========================================="
+
+          cosign sign --yes "${IMAGE_REF}@${DIGEST}"
+
+
+      # ----------------------------------------------------------
+      # VERIFICAR FIRMA
+      # ----------------------------------------------------------
+      - name: Verificar firma Cosign
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.IMAGE_REF }}
+          DIGEST: ${{ steps.image.outputs.DIGEST }}
+        run: |
+          echo "=========================================="
+          echo "Verificando firma:"
+          echo "${IMAGE_REF}@${DIGEST}"
+          echo "=========================================="
+
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/.*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE_REF}@${DIGEST}"
