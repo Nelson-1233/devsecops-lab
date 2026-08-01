@@ -210,7 +210,7 @@ jobs:
           image-ref: ${{ steps.meta.outputs.tags }}
           severity: "CRITICAL"
           ignore-unfixed: true
-          exit-code: "0"
+          exit-code: "1"
 
 
   # ============================================================
